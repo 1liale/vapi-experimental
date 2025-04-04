@@ -1,162 +1,119 @@
-import { useEffect, useRef, useState, useCallback } from "react";
-import Vapi from "@vapi-ai/web";
+// Environment variables
+const assistantId = process.env.NEXT_PUBLIC_VAPI_ASSISTANT_ID || "";
+const apiKey = process.env.NEXT_PUBLIC_VAPI_API_KEY || "";
 
-const publicKey = process.env.NEXT_PUBLIC_VAPI_PUBLIC_KEY || ""; // Replace with your actual public key
-const assistantId = process.env.NEXT_PUBLIC_VAPI_ASSISTANT_ID || ""; // Replace with your actual assistant ID
-
-const useVapi = () => {
-  const [volumeLevel, setVolumeLevel] = useState(0);
-  const [isSessionActive, setIsSessionActive] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
-  const [conversation, setConversation] = useState<
-    { role: string; text: string; timestamp: string; isFinal: boolean }[]
-  >([]);
-  const vapiRef = useRef<any>(null);
-
-  const initializeVapi = useCallback(() => {
-    if (!vapiRef.current) {
-      const vapiInstance = new Vapi(publicKey);
-      vapiRef.current = vapiInstance;
-
-      vapiInstance.on("call-start", () => {
-        setIsSessionActive(true);
-      });
-
-      vapiInstance.on("call-end", () => {
-        setIsSessionActive(false);
-        setConversation([]); // Reset conversation on call end
-      });
-
-      vapiInstance.on("volume-level", (volume: number) => {
-        setVolumeLevel(volume);
-      });
-
-      vapiInstance.on("message", (message: any) => {
-        if (message.type === "transcript") {
-          setConversation((prev) => {
-            const timestamp = new Date().toLocaleTimeString();
-            const updatedConversation = [...prev];
-            if (message.transcriptType === "final") {
-              // Find the partial message to replace it with the final one
-              const partialIndex = updatedConversation.findIndex(
-                (msg) => msg.role === message.role && !msg.isFinal,
-              );
-              if (partialIndex !== -1) {
-                updatedConversation[partialIndex] = {
-                  role: message.role,
-                  text: message.transcript,
-                  timestamp: updatedConversation[partialIndex].timestamp,
-                  isFinal: true,
-                };
-              } else {
-                updatedConversation.push({
-                  role: message.role,
-                  text: message.transcript,
-                  timestamp,
-                  isFinal: true,
-                });
-              }
-            } else {
-              // Add partial message or update the existing one
-              const partialIndex = updatedConversation.findIndex(
-                (msg) => msg.role === message.role && !msg.isFinal,
-              );
-              if (partialIndex !== -1) {
-                updatedConversation[partialIndex] = {
-                  ...updatedConversation[partialIndex],
-                  text: message.transcript,
-                };
-              } else {
-                updatedConversation.push({
-                  role: message.role,
-                  text: message.transcript,
-                  timestamp,
-                  isFinal: false,
-                });
-              }
-            }
-            return updatedConversation;
-          });
-        }
-
-        if (
-          message.type === "function-call" &&
-          message.functionCall.name === "changeUrl"
-        ) {
-          const command = message.functionCall.parameters.url.toLowerCase();
-          console.log(command);
-          // const newUrl = routes[command];
-          if (command) {
-            window.location.href = command;
-          } else {
-            console.error("Unknown route:", command);
-          }
-        }
-      });
-
-      vapiInstance.on("error", (e: Error) => {
-        console.error("Vapi error:", e);
-      });
-    }
-  }, []);
-
-  useEffect(() => {
-    initializeVapi();
-
-    // Cleanup function to end call and dispose Vapi instance
-    return () => {
-      if (vapiRef.current) {
-        vapiRef.current.stop();
-        vapiRef.current = null;
-      }
+/**
+ * Make an outbound call using the Vapi REST API
+ * @param {Object} options - Call parameters
+ * @returns {Promise} - Result of the call
+ */
+export const makeOutboundCall = async (options) => {
+  try {
+    // Construct the API request body
+    const requestBody = {
+      assistantId,
+      phoneNumberId: options.phoneNumberId,
+      customer: {
+        number: options.phoneNumber
+      },
+      assistantOverrides: {
+        variableValues: options.variables || {},
+      },
     };
-  }, [initializeVapi]);
 
-  const toggleCall = async () => {
-    try {
-      if (isSessionActive) {
-        await vapiRef.current.stop();
-      } else {
-        await vapiRef.current.start(assistantId);
-      }
-    } catch (err) {
-      console.error("Error toggling Vapi session:", err);
+    // Add scheduling if specified
+    if (options.scheduledTime) {
+      requestBody.schedulePlan = {
+        earliestAt: options.scheduledTime
+      };
     }
-  };
 
-  const sendMessage = (role: string, content: string) => {
-    if (vapiRef.current) {
-      vapiRef.current.send({
-        type: "add-message",
-        message: { role, content },
-      });
+    // Make API call to Vapi's /call endpoint
+    const response = await fetch('https://api.vapi.ai/call', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(requestBody)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Failed to make outbound call: ${errorData.message || response.statusText}`);
     }
-  };
 
-  const say = (message: string, endCallAfterSpoken = false) => {
-    if (vapiRef.current) {
-      vapiRef.current.say(message, endCallAfterSpoken);
-    }
-  };
-
-  const toggleMute = () => {
-    if (vapiRef.current) {
-      const newMuteState = !isMuted;
-      vapiRef.current.setMuted(newMuteState);
-      setIsMuted(newMuteState);
-    }
-  };
-
-  return {
-    volumeLevel,
-    isSessionActive,
-    conversation,
-    toggleCall,
-    sendMessage,
-    say,
-    toggleMute,
-    isMuted,
-  };
+    const data = await response.json();
+    return data;
+  } catch (err) {
+    console.error("Error making outbound call:", err);
+    return false;
+  }
 };
 
-export default useVapi;
+/**
+ * Get call analysis data from a completed call
+ * @param {Object} options - Options with callId
+ * @returns {Promise} - Analysis result
+ */
+export const getCallAnalysis = async (options) => {
+  try {
+    if (!options.callId) {
+      throw new Error("Call ID is required for analysis");
+    }
+
+    // Retrieve the call details which should include structured data
+    const callDetailsResponse = await fetch(`https://api.vapi.ai/call/${options.callId}`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`
+      }
+    });
+
+    if (!callDetailsResponse.ok) {
+      const errorData = await callDetailsResponse.json();
+      throw new Error(`Failed to get call details: ${errorData.message || callDetailsResponse.statusText}`);
+    }
+
+    const callDetails = await callDetailsResponse.json();
+    console.log("callDetails", callDetails);
+    
+    // Check if call is completed
+    if (callDetails.status !== 'completed') {
+      throw new Error(`Call analysis not available: call status is ${callDetails.status}`);
+    }
+
+    // Extract structured data from call details
+    const structuredData = callDetails.structuredData || {};
+    
+    // Create a simplified analysis result
+    const analysisResult = {
+      callId: callDetails.id,
+      timestamp: callDetails.startedAt ? new Date(callDetails.startedAt).toISOString() : null,
+      duration: callDetails.startedAt && callDetails.endedAt ? 
+        (new Date(callDetails.endedAt).getTime() - new Date(callDetails.startedAt).getTime()) / 1000 : null,
+      status: callDetails.status,
+      customerPhone: callDetails.destination?.number || null,
+      
+      // Use structured data from the call directly
+      mainTopics: structuredData.mainTopics || [],
+      customerPreferences: structuredData.customerPreferences || [],
+      customerQuestions: structuredData.customerQuestions || [],
+      actionItems: structuredData.actionItems || [],
+      overallSentiment: structuredData.overallSentiment || null,
+      appointmentConfirmed: structuredData.appointmentConfirmed || false,
+      
+      // Add transcript if available
+      transcript: callDetails.messages ? callDetails.messages.map((msg) => ({
+        role: msg.role,
+        content: msg.message,
+        time: msg.secondsFromStart
+      })) : []
+    };
+    
+    return analysisResult;
+  } catch (err) {
+    console.error("Error getting call analysis:", err);
+    throw err;
+  }
+};
